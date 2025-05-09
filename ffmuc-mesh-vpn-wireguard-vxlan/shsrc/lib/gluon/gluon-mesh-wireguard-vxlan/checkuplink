@@ -232,16 +232,64 @@ use_api_v2() {
 	PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
 }
 
+retry_wget() {
+    local url="$1"
+    local max_attempts=3
+    local attempt=1
+    local delay=1
+    local ret=0
+
+    while [ $attempt -le $max_attempts ];
+    do
+        wget "$url" --timeout=10 -O/dev/null -q && return 0 || ret=$?
+        logger -p warn -t checkuplink "wget attempt $attempt failed with code $ret, retrying in $delay seconds..."
+        sleep $delay
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+
+    return $ret
+}
+
+retry_batctl_ping() {
+    local gwmac="$1"
+    local max_attempts=3
+    local attempt=1
+    local delay=1
+
+    while [ $attempt -le $max_attempts ];
+    do
+        if batctl ping -c 7 -t 10 -i 1 "$gwmac" > /dev/null 2>&1; then
+            return 0
+        fi
+        logger -p warn -t checkuplink "batctl ping attempt $attempt failed, retrying in $delay seconds..."
+        sleep $delay
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+
+    return 1
+}
+
 is_connected() {
-	if wget "http://[$(wg  | grep fe80 | awk '{split($3,A,"/")};{print A[1]}')%$MESH_VPN_IFACE]/"  --timeout=5 -O/dev/null -q
-	then
-		GWMAC=$(batctl gwl | awk '/[*]/{print $2}')
-		if batctl ping -c 5 "$GWMAC" > /dev/null 2>&1
-		then
-			return 0 # true
-		fi
-	fi
-	return 1 # false
+    URL="http://[$(wg|grep fe80|awk '{split($3,A,"/")};{print A[1]}')%$MESH_VPN_IFACE]/"
+    GWMAC=$(batctl gwl|awk '/[*]/{print $2}')
+
+    if [ $(uci get wireguard.mesh_vpn.highlatencymode) -eq 1 ]; then
+        if retry_wget "$URL"; then
+            if retry_batctl_ping "$GWMAC"; then
+                return 0
+            fi
+        fi
+    else
+        if wget "$URL" --timeout=5 -O/dev/null -q; then
+            if batctl ping -c 5 "$GWMAC" > /dev/null 2>&1; then
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
 }
 
 # start main logic
